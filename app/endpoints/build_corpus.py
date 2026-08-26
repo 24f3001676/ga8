@@ -73,10 +73,11 @@ def _evaluate_object(obj):
     def gen_valid(g):
         return isinstance(g, str) and DECIMAL_RE.match(g) is not None
 
-    gens_valid = gen_valid(gen) and gen_valid(fetched)
-    if not gens_valid:
+    # Independently applicable: INVALID covers a non-decimal field;
+    # MISMATCH covers unequal supplied values (even when one is invalid).
+    if not gen_valid(gen) or not gen_valid(fetched):
         codes.add("GENERATION_INVALID")
-    elif gen != fetched:
+    if gen != fetched:
         codes.add("GENERATION_MISMATCH")
 
     crc = obj.get("crc32c")

@@ -90,6 +90,7 @@ def handle(body) -> dict:
         or len(set(slices_required)) != len(slices_required)
     ):
         policy_ok = False
+        slices_required = []  # never iterate an invalid value
     for k in ("license", "intendedUse", "limitations"):
         v = policy.get(k)
         if not isinstance(v, str) or v == "":

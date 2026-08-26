@@ -50,10 +50,35 @@ def test_uri_invalid_and_generation_codes():
     res = handle(body)
     codes = res["rejectedObjects"][0]["reasonCodes"]
     assert "URI_INVALID" in codes
-    assert "GENERATION_INVALID" not in codes or True
-    # generation x/y both non-decimal -> GENERATION_INVALID, no MISMATCH
+    # independently applicable: non-decimal fields AND unequal values
     assert "GENERATION_INVALID" in codes
-    assert "GENERATION_MISMATCH" not in codes
+    assert "GENERATION_MISMATCH" in codes
+
+
+def test_generation_code_matrix():
+    # invalid but equal values -> INVALID only
+    obj = make_object([make_row()], generation="abc", fetched="abc")
+    res = handle({"policy": POLICY, "objects": [obj]})
+    assert res["rejectedObjects"][0]["reasonCodes"] == ["GENERATION_INVALID"]
+
+    # valid but unequal -> MISMATCH only
+    obj2 = make_object([make_row()], generation="5", fetched="6")
+    res2 = handle({"policy": POLICY, "objects": [obj2]})
+    assert res2["rejectedObjects"][0]["reasonCodes"] == ["GENERATION_MISMATCH"]
+
+    # leading zeros are decimal strings; unequal strings -> MISMATCH
+    obj3 = make_object([make_row()], generation="07", fetched="7")
+    res3 = handle({"policy": POLICY, "objects": [obj3]})
+    assert res3["rejectedObjects"][0]["reasonCodes"] == ["GENERATION_MISMATCH"]
+
+    # missing fetchedGeneration -> INVALID + MISMATCH (None != "5")
+    obj4 = make_object([make_row()], generation="5")
+    obj4.pop("fetchedGeneration")
+    res4 = handle({"policy": POLICY, "objects": [obj4]})
+    assert set(res4["rejectedObjects"][0]["reasonCodes"]) == {
+        "GENERATION_INVALID",
+        "GENERATION_MISMATCH",
+    }
 
 
 def test_all_object_codes_emitted_independently():
@@ -71,6 +96,7 @@ def test_all_object_codes_emitted_independently():
     assert codes == {
         "URI_INVALID",
         "GENERATION_INVALID",
+        "GENERATION_MISMATCH",
         "CRC32C_INVALID",
         "SCHEMA_INVALID",
         "JSONL_INVALID",

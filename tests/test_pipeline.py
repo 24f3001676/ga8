@@ -336,3 +336,52 @@ def test_wrong_key_or_node_ignored():
         ev("w2", "nonexistent_node_x", "started", 1, k),
     ]))
     assert set(res["ignoredEventIds"]) >= {"w1"}
+
+
+def test_triggering_events_only_for_reuse_and_running():
+    # Spec attaches triggering events only to CACHE_HIT (success event)
+    # and RUNNING (start event); all other reasons carry none.
+    r0 = handle(body())
+    k = get_node(r0, "verify_data")["dependencyDigests"]["cacheKey"]
+
+    # plain start -> RUNNING triggered by its start event
+    res = handle(body(session="trig-a", events=[ev("f0", "verify_data", "started", 1, k)]))
+    vd = get_node(res, "verify_data")
+    assert vd["action"] == "block" and vd["reasonCodes"] == ["RUNNING"]
+    assert vd["triggeringEventIds"] == ["f0"]
+
+    # retry -> started(2): still RUNNING, triggered by the new start event
+    handle(body(session="trig-b", events=[ev("f1", "verify_data", "started", 1, k)]))
+    res_mid = handle(body(session="trig-b", events=[
+        ev("f1b", "verify_data", "retryable_failed", 1, k),
+        ev("f2", "verify_data", "started", 2, k),
+    ]))
+    vd_mid = get_node(res_mid, "verify_data")
+    assert vd_mid["action"] == "block" and vd_mid["reasonCodes"] == ["RUNNING"]
+    assert vd_mid["triggeringEventIds"] == ["f2"]
+
+    # sitting in retryable_failed: rerun/RETRYABLE_FAILURE, no triggering events
+    r1 = handle(body(session="trig-c"))
+    k1 = get_node(r1, "verify_data")["dependencyDigests"]["cacheKey"]
+    res3 = handle(body(session="trig-c", events=[
+        ev("g0", "verify_data", "started", 1, k1),
+        ev("g1", "verify_data", "retryable_failed", 1, k1),
+    ]))
+    vd3 = get_node(res3, "verify_data")
+    assert vd3["action"] == "rerun"
+    assert vd3["reasonCodes"] == ["RETRYABLE_FAILURE"]
+    assert vd3["triggeringEventIds"] == []
+
+    # terminal failure: block/TERMINAL_FAILURE, no triggering events
+    r2 = handle(body(session="trig-d"))
+    k2 = get_node(r2, "verify_data")["dependencyDigests"]["cacheKey"]
+    res4 = handle(body(session="trig-d", events=[
+        ev("h0", "verify_data", "started", 1, k2),
+        ev("h1", "verify_data", "terminal_failed", 1, k2),
+    ]))
+    vd4 = get_node(res4, "verify_data")
+    assert vd4["action"] == "block"
+    assert vd4["reasonCodes"] == ["TERMINAL_FAILURE"]
+    assert vd4["triggeringEventIds"] == []
+    # descendants blocked upstream
+    assert get_node(res4, "prepare")["reasonCodes"] == ["UPSTREAM_TERMINAL"]

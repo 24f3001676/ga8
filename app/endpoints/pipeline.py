@@ -358,13 +358,15 @@ def handle(body) -> dict:
         elif upstream_pending or k is None:
             entry = ("block", ["UPSTREAM_PENDING"], [])
         elif cached is not None:
+            # Spec: reuse is triggered by its immutable success event.
             entry = ("reuse", ["CACHE_HIT"], [cached["eventId"]])
         elif st is not None and st["status"] == "started":
+            # Spec: running is triggered by its start event.
             entry = ("block", ["RUNNING"], [st.get("start_event_id")])
         elif st is not None and st["status"] == "terminal_failed":
-            entry = ("block", ["TERMINAL_FAILURE"], [st.get("fail_event_id")])
+            entry = ("block", ["TERMINAL_FAILURE"], [])
         elif st is not None and st["status"] == "retryable_failed":
-            entry = ("rerun", ["RETRYABLE_FAILURE"], [st.get("fail_event_id")])
+            entry = ("rerun", ["RETRYABLE_FAILURE"], [])
         else:
             entry = ("rerun", ["CACHE_MISS"], [])
 

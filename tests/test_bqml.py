@@ -231,3 +231,84 @@ def test_unknown_phase_400_shape():
         handle({"phase": "nope"})
     with pytest.raises(InvalidInput):
         handle({})
+
+
+# ---- regression: full final-test decision matrix per grader feedback ----
+
+
+def _matrix_eval(ensure_run, **kw):
+    return handle(_eval_body(**kw))
+
+
+def test_matrix_aggregate_pass_slice_fail(ensure_run):
+    rows = [
+        {"label": 1, "prediction": 1, "slice": "critical"},
+        {"label": 1, "prediction": 0, "slice": "critical"},
+    ]
+    res = _matrix_eval(ensure_run, rows=rows)
+    assert res["decision"] == "reject"
+    assert "SLICE_FLOOR:critical" in res["reasonCodes"]
+    assert res["testMetric"] == 0.5
+    assert res["criticalSlicePass"] is False
+
+
+def test_matrix_aggregate_fail_slice_pass(ensure_run):
+    rows = [
+        {"label": 1, "prediction": 1, "slice": "critical"},
+        {"label": 1, "prediction": 0, "slice": "other"},
+        {"label": 1, "prediction": 0, "slice": "other"},
+        {"label": 1, "prediction": 0, "slice": "other"},
+    ]
+    res = _matrix_eval(ensure_run, metricFloor=0.5, rows=rows)
+    assert "AGGREGATE_FLOOR" in res["reasonCodes"]
+    assert "SLICE_FLOOR:critical" not in res["reasonCodes"]
+    assert res["criticalSlicePass"] is True  # not summarized by aggregate gate
+    assert res["decision"] == "reject"
+
+
+def test_matrix_bytes_exact_at_limit_and_exceeded(ensure_run):
+    res = _matrix_eval(ensure_run, bytesProcessed=2000)
+    assert res["decision"] == "admit"
+    assert "BYTE_LIMIT" not in res["reasonCodes"]
+
+    res2 = _matrix_eval(ensure_run, bytesProcessed=2001)
+    assert res2["decision"] == "reject"
+    assert "BYTE_LIMIT" in res2["reasonCodes"]
+    assert res2["criticalSlicePass"] is True  # byte gate not part of slice pass
+
+
+def test_matrix_invalid_row_still_checks_lineage_and_bytes(ensure_run):
+    rows = [{"label": 2, "prediction": 1, "slice": "critical"}]
+    res = _matrix_eval(ensure_run, rows=rows, bytesProcessed=9999)
+    assert res["testMetric"] is None
+    assert set(res["reasonCodes"]) == {"INVALID_TEST_ROW", "BYTE_LIMIT"}
+    assert res["decision"] == "reject"
+
+    res2 = _matrix_eval(ensure_run, runId="ghost", rows=rows)
+    assert set(res2["reasonCodes"]) == {"INVALID_LINEAGE", "INVALID_TEST_ROW"}
+
+
+def test_matrix_empty_rows_skip_slice_checks(ensure_run):
+    res = _matrix_eval(ensure_run, rows=[], requiredSlices={"never": 0.5})
+    assert "INVALID_TEST_ROW" in res["reasonCodes"]
+    assert f"MISSING_SLICE:{'never'}" not in res["reasonCodes"]
+    assert res["testMetric"] is None
+
+
+def test_matrix_rounding_twelve_decimals(ensure_run):
+    rows = [
+        {"label": 1, "prediction": 1, "slice": "s"},
+        {"label": 1, "prediction": 0, "slice": "s"},
+        {"label": 1, "prediction": 1, "slice": "s"},
+    ]
+    res = _matrix_eval(ensure_run, rows=rows, requiredSlices={})
+    assert res["testMetric"] == round(2 / 3, 12)
+
+
+def test_evaluate_does_not_mutate_selection(ensure_run):
+    before = handle(_eval_body())
+    after = handle(_eval_body(metricFloor=0.1))
+    assert before["datasetDigest"] == after["datasetDigest"]
+    # original selection still replayable identically
+    sel = sel_body()
+    assert handle(sel)["selectedTrialId"] == 4

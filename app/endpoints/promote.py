@@ -112,7 +112,8 @@ def _gate_version(entry, policy, as_of_dt) -> set:
             val = slices_dict[name]
             if not _finite_num(val) or not (0.0 <= float(val) <= 1.0):
                 codes.add(f"SLICE_RANGE:{name}")
-            elif float(val) < float(floor):
+            # Independently applicable: an out-of-range value can also miss its floor.
+            if _finite_num(val) and float(val) < float(floor):
                 codes.add(f"SLICE_FLOOR:{name}")
     return codes
 

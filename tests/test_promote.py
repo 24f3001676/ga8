@@ -193,3 +193,62 @@ def test_400_invalid_input():
                 "policy": {"datasetDigest": "d", "schemaDigest": "s"}, "versions": "x"})
     with pytest.raises(InvalidInput):
         handle(body([v("1", evaluation())], champion=5))
+
+
+# ---- regression: failedGates must report every applicable failure, untruncated ----
+
+
+def test_failed_gates_multiple_simultaneous_failures():
+    bad_eval = evaluation(
+        acc=0.5,
+        lat=500,
+        size=99999999,
+        artifact="sha:WRONG",
+        dataset="sha:WRONG-D",
+        schema="sha:WRONG-S",
+        created="2026-01-01T00:01:30Z",  # future vs asOf 00:01:00
+        slices={"critical": 0.1},
+    )
+    res = handle(body([v("1", bad_eval)]))
+    codes = set(res["failedGates"]["1"])
+    assert codes == {
+        "FUTURE_EVALUATION",
+        "ARTIFACT_MISMATCH",
+        "DATASET_MISMATCH",
+        "SCHEMA_MISMATCH",
+        "ACCURACY_FLOOR",
+        "LATENCY_LIMIT",
+        "SIZE_LIMIT",
+        "SLICE_FLOOR:critical",
+    }
+    # sorted by UTF-8 bytes, deduplicated
+    assert res["failedGates"]["1"] == sorted(res["failedGates"]["1"])
+    assert res["action"] == "block"
+
+
+def test_failed_gates_range_plus_floor_both_reported():
+    res = handle(body([v("1", evaluation(acc=-0.5))]))
+    assert set(res["failedGates"]["1"]) == {"METRIC_RANGE", "ACCURACY_FLOOR"}
+
+    res2 = handle(body([v("1", evaluation(slices={"critical": -0.2}))]))
+    assert set(res2["failedGates"]["1"]) == {"SLICE_RANGE:critical", "SLICE_FLOOR:critical"}
+
+
+def test_failed_gates_passing_version_empty_codes_and_all_versions_listed():
+    entries = [
+        v("1", evaluation(acc=0.9)),
+        v("2", evaluation(acc=0.3)),
+    ]
+    res = handle(body(entries))
+    assert res["failedGates"] == {"1": [], "2": ["ACCURACY_FLOOR"]}
+    assert res["eligibleVersions"] == ["1"]
+
+
+def test_failed_gates_stale_and_missing_slice_together():
+    e = evaluation(created="2025-12-31T20:00:00Z", slices={})
+    res = handle(body([v("1", e)]))
+    codes = set(res["failedGates"]["1"])
+    assert codes == {
+        "STALE_EVALUATION",
+        f"MISSING_SLICE:{'critical'}",
+    }

@@ -272,3 +272,20 @@ def test_policy_invalid_and_400():
         handle({"policy": policy()})
     with pytest.raises(InvalidInput):
         handle({"files": {}})
+
+
+# ---- regression: invalid requiredSlices must not crash or emit bogus slice codes ----
+
+
+def test_invalid_required_slices_no_crash_no_bogus_codes():
+    res = handle(body(policy=policy(requiredSlices=5)))
+    assert "INVALID_POLICY" in res["violations"]
+    assert not any(v.startswith("MISSING_SLICE:") for v in res["violations"])
+    assert res["decision"] == "reject"
+
+    res2 = handle(body(policy=policy(requiredSlices="abc")))
+    assert res2["violations"] == ["INVALID_POLICY"]
+
+    res3 = handle(body(policy=policy(requiredSlices=["dup", "dup"])))
+    assert "INVALID_POLICY" in res3["violations"]
+    assert not any(v.startswith("MISSING_SLICE:") for v in res3["violations"])

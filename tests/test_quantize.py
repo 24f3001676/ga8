@@ -242,3 +242,85 @@ def test_state_isolation_between_sessions_not_shared_with_bqml():
 
     again = qh(freeze_body(freeze_id="shared-id"))
     assert again["freezeId"] == "shared-id"
+
+
+# ---- regression tests for over-strict freeze validation (grader HTTP 400 bug) ----
+
+
+def test_freeze_without_allowed_unsupported_reasons_field_is_valid():
+    import json as _json
+
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    client = TestClient(app)
+    body = {
+        "phase": "freeze",
+        "freezeId": "grader-style-1",
+        "calibrationDigest": "cal-xyz",
+        "tokenizerDigest": "tok-xyz",
+        "candidates": [
+            {
+                "name": "int8",
+                "files": {"model.safetensors": "12345"},
+                "loadable": True,
+                "calibrationDigest": "cal-xyz",
+                "tokenizerDigest": "tok-xyz",
+                "unsupportedReason": None,
+            }
+        ],
+    }
+    res = client.post("/quantize", json=body)
+    assert res.status_code == 200, res.content
+    out = res.json()
+    assert out["candidates"][0]["status"] == "frozen"
+    # replay works and conflicts still detected
+    assert client.post("/quantize", json=body).json() == out
+    conflict = client.post("/quantize", json=dict(body, calibrationDigest="other"))
+    assert conflict.status_code == 409
+
+
+def test_freeze_with_duplicate_allowed_reasons_still_accepted():
+    b = freeze_body(allowedUnsupportedReasons=["A", "A", "B"])
+    res = handle(b)
+    assert [c["status"] for c in res["candidates"]] == ["frozen", "frozen"]
+
+
+def test_freeze_with_odd_freeze_id_does_not_500_or_reserve():
+    b = freeze_body(freeze_id=12345)
+    res = handle(b)  # must not raise
+    assert res["candidates"][0]["status"] == "frozen"
+    # not reservable: a later different request with same key shape is independent
+    b2 = freeze_body(freeze_id=99999)
+    assert handle(b2)["candidates"][0]["status"] == "frozen"
+
+
+def test_genuinely_malformed_freeze_still_400():
+    import pytest as _pytest
+
+    # empty candidate list
+    with _pytest.raises(InvalidInput):
+        handle(freeze_body(candidates=[]))
+    # non-array candidates
+    with _pytest.raises(InvalidInput):
+        handle(freeze_body(candidates="nope"))
+    # unknown phase
+    with _pytest.raises(InvalidInput):
+        handle({"phase": "bogus", "freezeId": "x", "candidates": [{"name": "a"}]})
+    with _pytest.raises(InvalidInput):
+        handle({"freezeId": "x", "candidates": []})
+
+
+def test_select_400_contract_preserved():
+    good = select_body()
+    base_fields = {k: good[k] for k in ("phase", "freezeId")}
+    # missing policy object -> 400
+    with pytest.raises(InvalidInput):
+        handle(dict(base_fields, candidates=[], rows=[]))
+    # rows not array -> 400
+    with pytest.raises(InvalidInput):
+        handle(dict(base_fields, candidates=[], rows="x", policy={}))
+    # candidates not array -> 400
+    with pytest.raises(InvalidInput):
+        handle(dict(base_fields, candidates=7, rows=[], policy={}))

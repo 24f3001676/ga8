@@ -255,3 +255,118 @@ def test_unknown_operation_400():
         handle({"operation": "nope"})
     with pytest.raises(InvalidInput):
         handle({})
+
+
+# ---- regression: PEFT parameter & adapter-file handling per grader feedback ----
+
+
+def test_repair_trainable_requires_allowed_target_and_lora_suffix():
+    body = repair_min(
+        parameters=[
+            {"name": "m.q.lora_A.weight", "target": "q", "numel": 3},      # qualifies
+            {"name": "m.v.lora_B.weight", "target": "not-allowed", "numel": 5},  # bad target
+            {"name": "m.x.weight", "target": "q", "numel": 7},             # bad suffix
+            {"name": "m.y.lora_A.weight", "target": "q", "numel": 11},     # qualifies
+        ],
+        allowedTargets=["q"],
+    )
+    res = handle(body)
+    assert res["trainableParams"] == ["m.q.lora_A.weight", "m.y.lora_A.weight"]
+    assert res["trainableCount"] == 14
+    assert res["peftConfigPass"] is True
+
+
+def test_repair_lora_suffix_is_exact():
+    body = repair_min(
+        parameters=[
+            {"name": "m.a.lora_A.weight.extra", "target": "x", "numel": 1},
+            {"name": "m.b.LORA_A.weight", "target": "x", "numel": 2},
+            {"name": "m.c.lora_A.weights", "target": "x", "numel": 3},
+            {"name": "ok.lora_A.weight", "target": "x", "numel": 9},
+        ],
+        allowedTargets=["x"],
+    )
+    res = handle(body)
+    assert res["trainableParams"] == ["ok.lora_A.weight"]
+    assert res["trainableCount"] == 9
+
+
+def test_repair_no_qualifying_parameter_is_invalid():
+    body = repair_min(parameters=[{"name": "m.a.weight", "target": "x", "numel": 1}])
+    res = handle(body)
+    assert "INVALID_PARAMETER" in res["reasonCodes"]
+    assert res["trainableParams"] == []
+    assert res["trainableCount"] == 0
+    assert res["peftConfigPass"] is False
+
+
+def test_repair_duplicate_param_names_and_bad_numel():
+    res = handle(repair_min(parameters=[
+        {"name": "a.lora_A.weight", "target": "x", "numel": 1},
+        {"name": "a.lora_A.weight", "target": "x", "numel": 2},
+    ]))
+    assert "INVALID_PARAMETER" in res["reasonCodes"]
+
+    for bad in (0, -5, 1.5, True, "9"):
+        res2 = handle(repair_min(parameters=[{"name": "a.lora_A.weight", "target": "x", "numel": bad}]))
+        assert "INVALID_PARAMETER" in res2["reasonCodes"], bad
+
+
+def test_repair_duplicate_allowed_targets_invalid():
+    res = handle(repair_min(allowedTargets=["x", "x"]))
+    assert "INVALID_PARAMETER" in res["reasonCodes"]
+
+
+def test_repair_adapter_file_set_matrix():
+    ok = ["adapter_config.json", "adapter_model.safetensors"]
+    assert handle(repair_min(artifactFiles=ok))["reasonCodes"] == []
+    assert handle(repair_min(artifactFiles=list(reversed(ok))))["reasonCodes"] == []
+
+    # missing
+    r = handle(repair_min(artifactFiles=["adapter_config.json"]))
+    assert "ADAPTER_FILE_SET" in r["reasonCodes"]
+    # duplicate (twice each, not once each)
+    r2 = handle(repair_min(artifactFiles=ok + ok))
+    assert "ADAPTER_FILE_SET" in r2["reasonCodes"]
+    # extra file
+    r3 = handle(repair_min(artifactFiles=ok + ["notes.txt"]))
+    assert "ADAPTER_FILE_SET" in r3["reasonCodes"]
+    assert "FULL_MODEL_ARTIFACT" not in r3["reasonCodes"]
+    # full-weight extra triggers both codes
+    r4 = handle(repair_min(artifactFiles=ok + ["pytorch_model.bin"]))
+    assert "ADAPTER_FILE_SET" in r4["reasonCodes"]
+    assert "FULL_MODEL_ARTIFACT" in r4["reasonCodes"]
+    # adapterFiles echoed sorted when valid set supplied in any order
+    assert handle(repair_min(artifactFiles=list(reversed(ok))))["adapterFiles"] == sorted(ok)
+
+
+def test_repair_lineage_and_isolation_matrix():
+    res = handle(repair_min(baseRevision="A" * 40))
+    assert "MUTABLE_BASE_REVISION" in res["reasonCodes"]
+
+    res2 = handle(repair_min(baseRevision="a" * 39))
+    assert "MUTABLE_BASE_REVISION" in res2["reasonCodes"]
+
+    res3 = handle(repair_min(codeDigest="c" * 63))
+    assert "LINEAGE_MISMATCH" in res3["reasonCodes"]
+    assert res3["lineagePass"] is False
+
+    res4 = handle(repair_min(expectedDigests={"dataset": "b" * 64}))
+    assert "LINEAGE_MISMATCH" in res4["reasonCodes"]
+
+    # empty eval ids -> leakage
+    res5 = handle(repair_min(evalRowIds=[]))
+    assert "EVAL_LEAKAGE" in res5["reasonCodes"]
+    assert res5["evalIsolated"] is False
+
+    # duplicate train ids -> leakage
+    res6 = handle(repair_min(trainRowIds=["t", "t"]))
+    assert "EVAL_LEAKAGE" in res6["reasonCodes"]
+
+    # safe big numel sum
+    big = 9007199254740991
+    res7 = handle(repair_min(parameters=[
+        {"name": "a.lora_A.weight", "target": "x", "numel": big},
+        {"name": "b.lora_A.weight", "target": "x", "numel": big},
+    ]))
+    assert res7["trainableCount"] == 2 * big

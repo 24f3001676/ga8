@@ -70,20 +70,8 @@ def _do_freeze(body: dict) -> dict:
     freeze_id = body.get("freezeId")
     candidates = body.get("candidates")
 
-    # Structural (request-level) validation -> HTTP 400.
-    if not isinstance(freeze_id, str) or not (0 < len(freeze_id) <= 128):
-        raise InvalidInput()
-    for k in ("calibrationDigest", "tokenizerDigest"):
-        v = body.get(k)
-        if not isinstance(v, str) or v == "":
-            raise InvalidInput()
-    allowed = body.get("allowedUnsupportedReasons")
-    if (
-        not isinstance(allowed, list)
-        or any(not isinstance(x, str) or x == "" for x in allowed)
-        or len(set(allowed)) != len(allowed)
-    ):
-        raise InvalidInput()
+    # Per spec, freeze-phase HTTP 400 is exactly for an empty/non-array
+    # candidate list (unknown/missing phase is handled by the caller).
     if not isinstance(candidates, list) or len(candidates) == 0:
         raise InvalidInput()
 
@@ -435,17 +423,18 @@ def handle(body) -> dict:
     phase = body.get("phase")
     store = get_store()
     if phase == "freeze":
-        # Replay/conflict handling.
+        # Replay/conflict handling (only well-formed string freezeIds are reservable).
         freeze_id = body.get("freezeId")
-        if isinstance(freeze_id, str) and 0 < len(freeze_id) <= 128:
+        reservable = isinstance(freeze_id, str) and 0 < len(freeze_id) <= 128
+        if reservable:
             existing = store.get(NS_FREEZE, freeze_id)
             if existing is not None:
                 if existing["request"] == body:
                     return existing["response"]
                 raise Conflict("FREEZE_ID_CONFLICT")
-        response = _do_freeze(body)  # raises InvalidInput on structural problems
-        if isinstance(body.get("freezeId"), str):
-            store.set(NS_FREEZE, body["freezeId"], {"request": body, "response": response})
+        response = _do_freeze(body)  # raises InvalidInput only per spec's 400 list
+        if reservable:
+            store.set(NS_FREEZE, freeze_id, {"request": body, "response": response})
         return response
     if phase == "select":
         candidates = body.get("candidates")
