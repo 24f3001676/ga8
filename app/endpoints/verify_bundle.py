@@ -123,6 +123,10 @@ def handle(body) -> dict:
     # ---- inventory ----
     recomputed = None
     inv_digest_out = None
+    recomputed = _inventory_recomputed(files)
+    if recomputed is not None:
+        # The digest hashes the exact compact JSON of the recomputed array.
+        inv_digest_out = sha256_hex(cj(recomputed).encode("utf-8"))
     if "inventory.json" in file_contents:
         parsed_inv = _parse_json_file(file_contents["inventory.json"])
         if parsed_inv == "__PARSE_ERROR__":
@@ -130,11 +134,9 @@ def handle(body) -> dict:
         elif not isinstance(parsed_inv, list):
             violations.add("INVENTORY_MISMATCH")
         else:
-            recomputed = _inventory_recomputed(files)
             if recomputed is None:
                 violations.add("INVENTORY_MISMATCH")
             else:
-                inv_digest_out = sha256_hex(cj(recomputed).encode("utf-8"))
                 expected_shape = [
                     {"name": e["name"], "bytes": e["bytes"], "sha256": e["sha256"]}
                     for e in recomputed
@@ -143,6 +145,10 @@ def handle(body) -> dict:
                 shape_ok = True
                 for entry in parsed_inv:
                     if not isinstance(entry, dict) or set(entry.keys()) != {"name", "bytes", "sha256"}:
+                        shape_ok = False
+                        break
+                    # Exact key order name,bytes,sha256.
+                    if list(entry.keys()) != ["name", "bytes", "sha256"]:
                         shape_ok = False
                         break
                     if not isinstance(entry["name"], str):

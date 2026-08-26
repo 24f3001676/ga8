@@ -324,3 +324,107 @@ def test_select_400_contract_preserved():
     # candidates not array -> 400
     with pytest.raises(InvalidInput):
         handle(dict(base_fields, candidates=7, rows=[], policy={}))
+
+
+# ---- regression: malformed candidates are never silently discarded ----
+
+
+def test_freeze_malformed_candidate_included_as_invalid():
+    b = freeze_body()
+    b["candidates"].append({"files": {"x.bin": "1"}, "loadable": True})  # missing name
+    res = handle(b)
+    names = [c["name"] for c in res["candidates"]]
+    assert "int4" in names and "int8" in names
+    assert None in names  # the nameless candidate is represented
+    entry = next(c for c in res["candidates"] if c["name"] is None)
+    assert entry["status"] == "invalid"
+    assert entry["reasonCodes"] == ["INVALID_INPUT"]
+    assert entry["inventory"] == [] and entry["totalBytes"] is None
+
+
+def test_freeze_non_dict_candidate_included():
+    import json as _json
+
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    client = TestClient(app)
+    body = {
+        "phase": "freeze",
+        "freezeId": "nondict-cand",
+        "calibrationDigest": "c",
+        "tokenizerDigest": "t",
+        "allowedUnsupportedReasons": [],
+        "candidates": ["just-a-string"],
+    }
+    res = client.post("/quantize", json=body)
+    assert res.status_code == 200
+    out = res.json()
+    assert len(out["candidates"]) == 1
+    assert out["candidates"][0] == {
+        "name": None,
+        "status": "invalid",
+        "inventory": [],
+        "totalBytes": None,
+        "packageDigest": None,
+        "reasonCodes": ["INVALID_INPUT"],
+    }
+
+
+def test_freeze_duplicate_names_all_invalid_but_present():
+    b = freeze_body()
+    dup = dict(b["candidates"][0])
+    b["candidates"].append(dup)  # second int8
+    res = handle(b)
+    int8_entries = [c for c in res["candidates"] if c["name"] == "int8"]
+    assert len(int8_entries) == 2
+    assert all(c["status"] == "invalid" for c in int8_entries)
+    assert all(c["reasonCodes"] == ["INVALID_INPUT"] for c in int8_entries)
+    # unique-named candidate unaffected
+    assert [c["status"] for c in res["candidates"] if c["name"] == "int4"] == ["frozen"]
+
+
+def test_freeze_empty_string_reason_is_unallowed():
+    b = freeze_body()
+    b["candidates"][0]["unsupportedReason"] = ""
+    res = handle(b)
+    entry = next(c for c in res["candidates"] if c["name"] == "int8")
+    assert entry["status"] == "invalid"
+    assert entry["reasonCodes"] == ["UNALLOWED_UNSUPPORTED_REASON"]
+    # files were valid, so inventory is still reported
+    assert entry["totalBytes"] == len(b["candidates"][0]["files"]["model.safetensors"].encode())
+
+
+def test_freeze_loadable_typing():
+    b = freeze_body(freeze_id="load-t")
+    b["candidates"][0]["loadable"] = False
+    res = handle(b)
+    entry = next(c for c in res["candidates"] if c["name"] == "int8")
+    assert entry["reasonCodes"] == ["NOT_LOADABLE"]
+
+    for i, bad in enumerate((1, "true", None)):
+        b2 = freeze_body(freezeId=f"load-t-{i}")
+        b2["candidates"][0]["loadable"] = bad
+        res2 = handle(b2)
+        entry2 = next(c for c in res2["candidates"] if c["name"] == "int8")
+        assert "INVALID_INPUT" in entry2["reasonCodes"], bad
+
+
+def test_select_reordered_candidates_array_invalid_manifest():
+    frozen = handle(freeze_body())
+    reordered = list(reversed(frozen["candidates"]))  # wrong order vs stored response
+    rows = [{"label": 1, "slice": "critical", "predictions": {"int4": 1, "int8": 1}}]
+    res = handle(select_body(stored_candidates=reordered, rows=rows))
+    assert res["selected"] is None
+    for r in res["results"]:
+        assert "INVALID_MANIFEST" in r["reasonCodes"]
+        assert r["admitted"] is False
+
+
+def test_freeze_id_boundary_128_chars_ok():
+    long_id = "f" * 128
+    res = handle(freeze_body(freeze_id=long_id))
+    assert res["freezeId"] == long_id
+    # exact replay
+    assert handle(freeze_body(freezeId=long_id))["freezeId"] == long_id

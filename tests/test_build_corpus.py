@@ -33,11 +33,13 @@ def test_happy_path_single_row_train():
     res = handle(body)
     # entity canonicalized to "héllo"
     assert len(res["splits"]["train"]) == 1
-    line = json.loads(res["splits"]["train"][0])
+    line = res["splits"]["train"][0]
     assert line["entity"] == "héllo"
     assert line["eventTime"] == "2026-01-02T00:00:00.000Z"
     assert line["text"] == "hi there"
-    expected = json.dumps(line, ensure_ascii=False, separators=(",", ":")) + "\n"
+    # digest is over compact JSON (exact key order, non-ASCII direct) + newline
+    expected = json.dumps(line, ensure_ascii=False, separators=(",", ":"),) + "\n"
+    assert list(line.keys()) == ["id", "entity", "eventTime", "revision", "text"]
     assert res["digests"]["train"] == hashlib.sha256(expected.encode("utf-8")).hexdigest()
     assert res["rejectedObjects"] == []
     assert res["rejectedRows"] == []
@@ -151,7 +153,7 @@ def test_duplicate_revision_tiebreak():
     r_high = make_row(id="aaa", revision=9)
     body = {"policy": POLICY, "objects": [make_object([r_low, r_high])]}
     res = handle(body)
-    ids = {json.loads(s)["id"] for s in res["splits"]["train"]}
+    ids = {row["id"] for row in res["splits"]["train"]}
     rejected = [e["id"] for e in res["rejectedRows"]]
     assert rejected == ["zzz"]
     assert "aaa" in ids and "zzz" not in ids
@@ -187,10 +189,10 @@ def test_out_of_window():
 
 
 def test_unicode_whitespace_collapse():
-    row = make_row(entity="A\u00a0\u00a0B", text="x \n y")
+    row = make_row(entity="A\u00a0\u00a0B", text="x \n y")
     res = handle({"policy": POLICY, "objects": [make_object([row])]}
                  )
-    line = json.loads(res["splits"]["train"][0])
+    line = res["splits"]["train"][0]
     assert line["entity"] == "a b"
     assert line["text"] == "x y"
 
@@ -201,9 +203,9 @@ def test_bucket_assignment_deterministic():
         rows.append(make_row(id=f"id{i:03d}", entity=f"ent-{i}", revision=1, text=f"unique text {i}"))
     res = handle({"policy": POLICY, "objects": [make_object(rows)]})
     all_rows = (
-        [json.loads(s) for s in res["splits"]["train"]]
-        + [json.loads(s) for s in res["splits"]["validation"]]
-        + [json.loads(s) for s in res["splits"]["test"]]
+        list(res["splits"]["train"])
+        + list(res["splits"]["validation"])
+        + list(res["splits"]["test"])
     )
     assert len(all_rows) == 60
 
@@ -211,12 +213,12 @@ def test_bucket_assignment_deterministic():
         h = hashlib.sha256(entity.encode("utf-8")).digest()
         return h[0] % 10
 
-    for s in res["splits"]["train"]:
-        assert bucket(json.loads(s)["entity"]) <= 5
-    for s in res["splits"]["validation"]:
-        assert 6 <= bucket(json.loads(s)["entity"]) <= 7
-    for s in res["splits"]["test"]:
-        assert bucket(json.loads(s)["entity"]) >= 8
+    for row in res["splits"]["train"]:
+        assert bucket(row["entity"]) <= 5
+    for row in res["splits"]["validation"]:
+        assert 6 <= bucket(row["entity"]) <= 7
+    for row in res["splits"]["test"]:
+        assert bucket(row["entity"]) >= 8
 
 
 def test_contamination_rejects_val_test_but_not_identical_train_pairing():
@@ -261,3 +263,39 @@ def test_lineage_sorted_and_supplied_values_kept():
         "crc32c": o2["crc32c"],
         "schemaId": "training-v1",
     }
+
+
+# ---- regression: exact JSONL_INVALID vs SCHEMA_INVALID partition ----
+
+
+def test_garbage_only_file_is_jsonl_invalid_only():
+    obj = make_object([])
+    obj["content"] = "not json at all\nstill not json\n"
+    obj["crc32c"] = crc32c_hex(obj["content"].encode())
+    res = handle({"policy": POLICY, "objects": [obj]})
+    assert res["rejectedObjects"][0]["reasonCodes"] == ["JSONL_INVALID"]
+
+
+def test_blank_only_file_is_schema_invalid_only():
+    obj = make_object([])
+    obj["content"] = "   \n\t\n"
+    obj["crc32c"] = crc32c_hex(obj["content"].encode())
+    res = handle({"policy": POLICY, "objects": [obj]})
+    assert res["rejectedObjects"][0]["reasonCodes"] == ["SCHEMA_INVALID"]
+
+
+def test_mixed_parse_and_shape_failures_emit_both():
+    good = json.dumps(make_row())
+    obj = make_object([])
+    obj["content"] = good + "\n{broken\n"
+    obj["crc32c"] = crc32c_hex(obj["content"].encode())
+    res = handle({"policy": POLICY, "objects": [obj]})
+    assert set(res["rejectedObjects"][0]["reasonCodes"]) == {"JSONL_INVALID"}
+
+
+def test_wrong_shape_rows_are_schema_invalid():
+    obj = make_object([])
+    obj["content"] = json.dumps({"id": "a", "entity": "e", "eventTime": "2026-01-01T00:00:00Z"}) + "\n"
+    obj["crc32c"] = crc32c_hex(obj["content"].encode())
+    res = handle({"policy": POLICY, "objects": [obj]})
+    assert res["rejectedObjects"][0]["reasonCodes"] == ["SCHEMA_INVALID"]

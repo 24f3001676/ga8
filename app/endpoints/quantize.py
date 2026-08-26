@@ -32,36 +32,39 @@ def _compute_inventory(files) -> "tuple[list[dict], int] | None":
 
 
 def _candidate_status(cand, request) -> "tuple[str, list[str]]":
+    """Status/reason codes for one candidate object (assumed to be a dict)."""
     codes = set()
-    if not isinstance(cand, dict):
-        return "invalid", ["INVALID_INPUT"]
 
     reason = cand.get("unsupportedReason")
-    has_reason = isinstance(reason, str) and reason != ""
-    if isinstance(reason, str) and reason == "":
-        has_reason = False
-    if reason is not None and not isinstance(reason, str):
-        return "invalid", ["INVALID_INPUT"]
-
     allowed = request.get("allowedUnsupportedReasons")
     allowed_set = set(allowed) if isinstance(allowed, list) else set()
 
-    if has_reason:
+    if reason is not None:
+        if not isinstance(reason, str):
+            # Wrong-typed reason value.
+            return "invalid", ["INVALID_INPUT"]
+        # Any supplied string reason (including "") is checked against the
+        # allowed list; allowed reasons are non-empty so "" never qualifies.
         if reason in allowed_set:
             return "unsupported", []
         return "invalid", ["UNALLOWED_UNSUPPORTED_REASON"]
 
     loadable = cand.get("loadable")
-    if loadable is not True:
+    if loadable is False:
         codes.add("NOT_LOADABLE")
+    elif loadable is not True:
+        # Non-boolean loadable value is malformed input.
+        codes.add("INVALID_INPUT")
+
     calib = cand.get("calibrationDigest")
     tok = cand.get("tokenizerDigest")
     if calib != request.get("calibrationDigest"):
         codes.add("CALIBRATION_MISMATCH")
     if tok != request.get("tokenizerDigest"):
         codes.add("TOKENIZER_MISMATCH")
-    if calib is None or tok is None or not isinstance(calib, str) or not isinstance(tok, str) or calib == "" or tok == "":
+    if not isinstance(calib, str) or calib == "" or not isinstance(tok, str) or tok == "":
         codes.add("INVALID_INPUT")
+
     status = "frozen" if not codes else "invalid"
     return status, sorted(codes)
 
@@ -75,30 +78,45 @@ def _do_freeze(body: dict) -> dict:
     if not isinstance(candidates, list) or len(candidates) == 0:
         raise InvalidInput()
 
-    out_candidates = []
-    seen_names = {}
+    # Candidate names must be unique; every occurrence of a duplicated name
+    # is invalid. Malformed candidates are never silently discarded.
+    name_counts: "dict[str, int]" = {}
     for cand in candidates:
-        name = cand.get("name") if isinstance(cand, dict) else None
-        if not isinstance(name, str) or name == "":
-            continue  # unnamed candidate cannot be represented; skipped
+        if isinstance(cand, dict):
+            name = cand.get("name")
+            if isinstance(name, str) and name != "":
+                name_counts[name] = name_counts.get(name, 0) + 1
+
+    out_candidates = []
+    for idx, cand in enumerate(candidates):
+        name_value = cand.get("name") if isinstance(cand, dict) else None
+
+        def new_entry(nv, status, codes):
+            entry = {
+                "name": nv,
+                "status": status,
+                "inventory": [],
+                "totalBytes": None,
+                "packageDigest": None,
+                "reasonCodes": reason_codes(codes),
+            }
+            out_candidates.append(entry)
+            return entry
+
+        if not isinstance(cand, dict):
+            new_entry(None, "invalid", ["INVALID_INPUT"])
+            continue
+        if not isinstance(name_value, str) or name_value == "":
+            new_entry(name_value, "invalid", ["INVALID_INPUT"])
+            continue
+
         inventory = _compute_inventory(cand.get("files"))
         status, codes = _candidate_status(cand, body)
-        if name in seen_names:
-            seen_names[name]["reasonCodes"] = reason_codes(
-                seen_names[name]["reasonCodes"] + ["INVALID_INPUT"] + codes
-            )
-            seen_names[name]["status"] = (
-                "invalid" if seen_names[name]["status"] != "invalid" else seen_names[name]["status"]
-            )
-            continue
-        entry = {
-            "name": name,
-            "status": status,
-            "inventory": [],
-            "totalBytes": None,
-            "packageDigest": None,
-            "reasonCodes": reason_codes(codes),
-        }
+        codes = set(codes)
+        if name_counts[name_value] > 1:
+            codes.add("INVALID_INPUT")
+            status = "invalid"
+        entry = new_entry(name_value, status, codes)
         if inventory is not None:
             entries, total = inventory
             entry["inventory"] = entries
@@ -107,10 +125,15 @@ def _do_freeze(body: dict) -> dict:
         else:
             entry["status"] = "invalid"
             entry["reasonCodes"] = reason_codes(entry["reasonCodes"] + ["INVALID_INPUT"])
-        seen_names[name] = entry
-        out_candidates.append(entry)
 
-    out_candidates.sort(key=lambda e: utf8_key(e["name"]))
+    def sort_key(item):
+        i, e = item
+        if isinstance(e["name"], str):
+            return (0, utf8_key(e["name"]), i)
+        return (1, b"", i)
+
+    ordered = sorted(enumerate(out_candidates), key=sort_key)
+    out_candidates = [e for _, e in ordered]
     response = {"freezeId": freeze_id, "candidates": out_candidates}
     return response
 
@@ -222,6 +245,13 @@ def _do_select(body: dict, stored) -> dict:
         )
     )
 
+    # The supplied candidate array must EXACTLY equal the stored response
+    # array (same candidates, same order). Any deviation invalidates the
+    # manifest for every candidate.
+    array_exact = False
+    if stored is not None and isinstance(frozen_response, dict):
+        array_exact = supplied_candidates == frozen_response.get("candidates")
+
     for name in names:
         codes = set()
         supplied = next((c for c in supplied_candidates if isinstance(c, dict) and c.get("name") == name), {})
@@ -242,7 +272,7 @@ def _do_select(body: dict, stored) -> dict:
             manifest_ok = False
             lineage_ok = False
         else:
-            if supplied != rec:
+            if not array_exact:
                 codes.add("INVALID_MANIFEST")
                 manifest_ok = False
             if rec is None or rec.get("status") != "frozen":

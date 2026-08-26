@@ -338,9 +338,9 @@ def test_wrong_key_or_node_ignored():
     assert set(res["ignoredEventIds"]) >= {"w1"}
 
 
-def test_triggering_events_only_for_reuse_and_running():
-    # Spec attaches triggering events only to CACHE_HIT (success event)
-    # and RUNNING (start event); all other reasons carry none.
+def test_triggering_events_match_node_states():
+    # CACHE_HIT -> its immutable success event; RUNNING -> its start event;
+    # RETRYABLE_FAILURE / TERMINAL_FAILURE -> their failure events.
     r0 = handle(body())
     k = get_node(r0, "verify_data")["dependencyDigests"]["cacheKey"]
 
@@ -360,7 +360,7 @@ def test_triggering_events_only_for_reuse_and_running():
     assert vd_mid["action"] == "block" and vd_mid["reasonCodes"] == ["RUNNING"]
     assert vd_mid["triggeringEventIds"] == ["f2"]
 
-    # sitting in retryable_failed: rerun/RETRYABLE_FAILURE, no triggering events
+    # sitting in retryable_failed: rerun/RETRYABLE_FAILURE, triggered by the failure event
     r1 = handle(body(session="trig-c"))
     k1 = get_node(r1, "verify_data")["dependencyDigests"]["cacheKey"]
     res3 = handle(body(session="trig-c", events=[
@@ -370,9 +370,9 @@ def test_triggering_events_only_for_reuse_and_running():
     vd3 = get_node(res3, "verify_data")
     assert vd3["action"] == "rerun"
     assert vd3["reasonCodes"] == ["RETRYABLE_FAILURE"]
-    assert vd3["triggeringEventIds"] == []
+    assert vd3["triggeringEventIds"] == ["g1"]
 
-    # terminal failure: block/TERMINAL_FAILURE, no triggering events
+    # terminal failure: block/TERMINAL_FAILURE, triggered by the terminal event
     r2 = handle(body(session="trig-d"))
     k2 = get_node(r2, "verify_data")["dependencyDigests"]["cacheKey"]
     res4 = handle(body(session="trig-d", events=[
@@ -382,6 +382,90 @@ def test_triggering_events_only_for_reuse_and_running():
     vd4 = get_node(res4, "verify_data")
     assert vd4["action"] == "block"
     assert vd4["reasonCodes"] == ["TERMINAL_FAILURE"]
-    assert vd4["triggeringEventIds"] == []
+    assert vd4["triggeringEventIds"] == ["h1"]
     # descendants blocked upstream
     assert get_node(res4, "prepare")["reasonCodes"] == ["UPSTREAM_TERMINAL"]
+
+
+def test_dependency_digest_field_names_and_order():
+    res = handle(body(session="deporder"))
+    nodes = {n["node"]: n for n in res["nodes"]}
+    vd = nodes["verify_data"]
+    assert list(vd["dependencyDigests"].keys()) == ["generation", "checksum", "cacheKey"]
+    prep = nodes["prepare"]
+    assert list(prep["dependencyDigests"].keys()) == [
+        "canonicalData", "prepareCode", "prepareConfig", "cacheKey",
+    ]
+    train = nodes["train"]
+    assert list(train["dependencyDigests"].keys()) == [
+        "prepareArtifact", "trainCode", "trainConfig", "runtime", "cacheKey",
+    ]
+    evaluate = nodes["evaluate"]
+    assert list(evaluate["dependencyDigests"].keys()) == [
+        "trainArtifact", "canonicalData", "evaluateCode", "evaluateConfig", "cacheKey",
+    ]
+    register = nodes["register"]
+    assert list(register["dependencyDigests"].keys()) == [
+        "evaluateArtifact", "schemaDigest", "cacheKey",
+    ]
+    publish = nodes["publish"]
+    assert list(publish["dependencyDigests"].keys()) == [
+        "registerArtifact", "publishConfig", "cacheKey",
+    ]
+
+
+def test_parent_gated_key_chain():
+    s = "gate-chain"
+    r0 = handle(body(session=s))
+    n0 = {n["node"]: n for n in r0["nodes"]}
+    assert n0["verify_data"]["dependencyDigests"]["cacheKey"] is not None
+    assert n0["prepare"]["action"] == "block"  # blocked until verify_data artifact exists
+    kv = n0["verify_data"]["dependencyDigests"]["cacheKey"]
+
+    r1 = handle(body(session=s, events=[
+        ev("c1", "verify_data", "started", 1, kv),
+        ev("c2", "verify_data", "succeeded", 1, kv, artifact="art-v"),
+    ]))
+    n1 = {n["node"]: n for n in r1["nodes"]}
+    kp = n1["prepare"]["dependencyDigests"]["cacheKey"]
+    assert kp is not None                      # parent reusable -> key available
+    assert n1["train"]["dependencyDigests"]["cacheKey"] is None  # train gated on prepare artifact
+
+    r2 = handle(body(session=s, events=[
+        ev("c3", "prepare", "started", 1, kp),
+        ev("c4", "prepare", "succeeded", 1, kp, artifact="art-p"),
+    ]))
+    n2 = {n["node"]: n for n in r2["nodes"]}
+    kt = n2["train"]["dependencyDigests"]["cacheKey"]
+    assert kt is not None
+    assert n2["train"]["dependencyDigests"]["prepareArtifact"] == "art-p"
+    assert n2["evaluate"]["dependencyDigests"]["cacheKey"] is None
+
+    r3 = handle(body(session=s, events=[
+        ev("c5", "train", "started", 1, kt),
+        ev("c6", "train", "succeeded", 1, kt, artifact="art-t"),
+    ]))
+    n3 = {n["node"]: n for n in r3["nodes"]}
+    ke = n3["evaluate"]["dependencyDigests"]["cacheKey"]
+    assert ke is not None
+    assert n3["evaluate"]["dependencyDigests"]["trainArtifact"] == "art-t"
+
+    r4 = handle(body(session=s, events=[
+        ev("c7", "evaluate", "started", 1, ke),
+        ev("c8", "evaluate", "succeeded", 1, ke, artifact="art-e"),
+    ]))
+    n4 = {n["node"]: n for n in r4["nodes"]}
+    kr = n4["register"]["dependencyDigests"]["cacheKey"]
+    assert kr is not None
+    assert n4["register"]["dependencyDigests"]["evaluateArtifact"] == "art-e"
+
+    r5 = handle(body(session=s, events=[
+        ev("c9", "register", "started", 1, kr),
+        ev("c10", "register", "succeeded", 1, kr, artifact="art-r",
+           receipt=f"receipt:register:{kr}"),
+    ]))
+    n5 = {n["node"]: n for n in r5["nodes"]}
+    kpub = n5["publish"]["dependencyDigests"]["cacheKey"]
+    assert kpub is not None
+    assert n5["publish"]["dependencyDigests"]["registerArtifact"] == "art-r"
+    assert all(node["action"] == "reuse" or node["node"] == "publish" for node in r5["nodes"])

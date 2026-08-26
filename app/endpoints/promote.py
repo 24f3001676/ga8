@@ -149,8 +149,7 @@ def handle(body) -> dict:
     seen = set()
     for entry, v_raw in parsed:
         if not _canonical_version(v_raw):
-            if isinstance(v_raw, str):
-                pre_codes.setdefault(v_raw, set()).add("INVALID_VERSION")
+            pre_codes.setdefault(_gate_key(v_raw), set()).add("INVALID_VERSION")
             continue
         if v_raw in seen:
             pre_codes.setdefault(v_raw, set()).add("DUPLICATE_VERSION")
@@ -220,11 +219,10 @@ def handle(body) -> dict:
 
     failed_out = {}
     for _, v_raw in parsed:
-        if not isinstance(v_raw, str):
-            continue
-        if v_raw not in failed_out:
-            codes = set(pre_codes.get(v_raw, set())) | set(failed_gates.get(v_raw, set()))
-            failed_out[v_raw] = reason_codes(codes)
+        key = _gate_key(v_raw)
+        if key not in failed_out:
+            codes = set(pre_codes.get(key, set())) | set(failed_gates.get(v_raw, set()))
+            failed_out[key] = reason_codes(codes)
 
     return {
         "action": action,
@@ -235,6 +233,32 @@ def handle(body) -> dict:
         "aliasMutation": alias_mutation,
         "evidence": evidence,
     }
+
+
+def _gate_key(v_raw) -> str:
+    """JSON-object key for an input version, mirroring JS property coercion."""
+    if isinstance(v_raw, str):
+        return v_raw
+    if v_raw is None:
+        return "null"
+    if v_raw is True:
+        return "true"
+    if v_raw is False:
+        return "false"
+    if isinstance(v_raw, int):
+        return str(v_raw)
+    if isinstance(v_raw, float):
+        import math
+
+        if math.isfinite(v_raw) and v_raw == int(v_raw):
+            return str(int(v_raw))
+        return repr(v_raw)
+    from app.core.hashing import cj
+
+    try:
+        return cj(v_raw)
+    except Exception:
+        return "[object]"
 
 
 def _evaluation_for(valid_unique, version_id):

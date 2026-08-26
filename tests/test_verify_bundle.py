@@ -289,3 +289,34 @@ def test_invalid_required_slices_no_crash_no_bogus_codes():
     res3 = handle(body(policy=policy(requiredSlices=["dup", "dup"])))
     assert "INVALID_POLICY" in res3["violations"]
     assert not any(v.startswith("MISSING_SLICE:") for v in res3["violations"])
+
+
+# ---- regression: inventory key order and digest availability ----
+
+
+def test_inventory_entry_wrong_key_order_is_mismatch():
+    files = make_files()
+    inv = json.loads(files["inventory.json"])
+    reordered = [{k: e[k] for k in ("sha256", "bytes", "name")} for e in inv]  # wrong order
+    files["inventory.json"] = json.dumps(reordered, separators=(",", ":"))
+    res = handle(body(files=files))
+    assert "INVENTORY_MISMATCH" in res["violations"]
+    assert res["decision"] == "reject"
+
+
+def test_inventory_digest_present_even_when_inventory_json_missing():
+    files = make_files()
+    del files["inventory.json"]
+    res = handle(body(files=files))
+    assert f"MISSING_FILE:{'inventory.json'}" in res["violations"]
+    # recomputed array is still well-defined -> digest still reported
+    assert res["inventoryDigest"] is not None
+    assert len(res["inventoryDigest"]) == 64
+
+
+def test_inventory_digest_null_when_non_string_file_values():
+    files = make_files()
+    del files["inventory.json"]
+    files["adapter_config.json"] = 12345  # non-string content
+    res = handle(body(files=files))
+    assert res["inventoryDigest"] is None

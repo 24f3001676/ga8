@@ -364,9 +364,9 @@ def handle(body) -> dict:
             # Spec: running is triggered by its start event.
             entry = ("block", ["RUNNING"], [st.get("start_event_id")])
         elif st is not None and st["status"] == "terminal_failed":
-            entry = ("block", ["TERMINAL_FAILURE"], [])
+            entry = ("block", ["TERMINAL_FAILURE"], [st.get("fail_event_id")])
         elif st is not None and st["status"] == "retryable_failed":
-            entry = ("rerun", ["RETRYABLE_FAILURE"], [])
+            entry = ("rerun", ["RETRYABLE_FAILURE"], [st.get("fail_event_id")])
         else:
             entry = ("rerun", ["CACHE_MISS"], [])
 

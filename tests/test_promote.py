@@ -252,3 +252,33 @@ def test_failed_gates_stale_and_missing_slice_together():
         "STALE_EVALUATION",
         f"MISSING_SLICE:{'critical'}",
     }
+
+
+# ---- regression: failedGates covers every input version, incl. non-string versions ----
+
+
+def test_failed_gates_non_string_version_keys():
+    entries = [
+        {"version": 42, "artifactDigest": "sha:a", "tags": {}, "evaluation": evaluation()},
+        {"version": None, "artifactDigest": "sha:a", "tags": {}, "evaluation": evaluation()},
+        v("1", evaluation(acc=0.9)),
+    ]
+    res = handle(body(entries))
+    assert res["failedGates"]["42"] == ["INVALID_VERSION"]
+    assert res["failedGates"]["null"] == ["INVALID_VERSION"]
+    assert res["failedGates"]["1"] == []
+    # eligible ranking only contains the canonical version
+    assert res["eligibleVersions"] == ["1"]
+
+
+def test_failed_gates_boolean_version_key():
+    entries = [
+        {"version": True, "artifactDigest": "sha:a", "tags": {}, "evaluation": evaluation()},
+        v("2", evaluation()),
+    ]
+    res = handle(body(entries, champion="2"))
+    assert res["failedGates"]["true"] == ["INVALID_VERSION"]
+    assert res["failedGates"]["2"] == []
+    # single eligible candidate IS the champion: improvement 0 < minImprovement
+    assert res["action"] == "retain"
+    assert res["selectedVersion"] == "2"

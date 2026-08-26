@@ -96,25 +96,26 @@ def _evaluate_object(obj):
 
     rows = []
     if content_is_str:
-        saw_row = False
+        saw_line = False
         parse_failed = False
         shape_failed = False
         for line in content.split("\n"):
             if line.strip() == "":
                 continue
+            saw_line = True
             try:
                 parsed = json.loads(line)
             except Exception:
                 parse_failed = True
                 continue
-            saw_row = True
             if not _validate_row_shape(parsed):
                 shape_failed = True
         if parse_failed:
             codes.add("JSONL_INVALID")
-        if shape_failed or not saw_row:
+        # "Empty file" = no non-blank lines at all (blank lines are ignored).
+        if not saw_line or shape_failed:
             codes.add("SCHEMA_INVALID")
-        if not parse_failed and not shape_failed and saw_row:
+        if not parse_failed and not shape_failed and saw_line:
             for line in content.split("\n"):
                 if line.strip() == "":
                     continue
@@ -296,7 +297,9 @@ def handle(body: dict) -> dict:
                 "revision": r["revision"],
                 "text": r["text"],
             }
-            final_splits[group].append(cj(row_json))
+            # Split rows are returned as objects with the exact key order;
+            # compact serialization (+ newline per row) is what gets hashed.
+            final_splits[group].append(row_json)
             lines.append(cj(row_json))
         payload = "".join(line + "\n" for line in lines).encode("utf-8")
         digests[group] = sha256_hex(payload)
